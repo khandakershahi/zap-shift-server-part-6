@@ -74,7 +74,51 @@ async function run() {
     const paymentCollection = db.collection("payment");
     const ridersCollection = db.collection("riders");
 
+    // middle admin before allowing admin activity
+    // must be used after verifyFBToken middleware
+
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decoded_email;
+      const query = { email };
+      const user = await userCollection.findOne(query);
+
+      if (!user || user.role !== "admin") {
+        return res.status(403).message({ message: "forbidden access" });
+      }
+
+      next();
+    };
+
     // user api
+
+    app.get("/users", verifyFBToken, async (req, res) => {
+      const searchText = req.query.searchText;
+      const query = {};
+      if (searchText) {
+        // query.name = { $regex: searchText, $options: "i" };
+
+        query.$or = [
+          { name: { $regex: searchText, $options: "i" } },
+          { email: { $regex: searchText, $options: "i" } },
+        ];
+      }
+
+      const cursor = userCollection
+        .find(query)
+        .sort({ createdAt: -1 })
+        .limit(5);
+      const result = await cursor.toArray();
+      res.send(result);
+    });
+
+    app.get("/users/:id", async (req, res) => {});
+
+    app.get("/users/:email/role", async (req, res) => {
+      const email = req.params.email;
+      const query = { email };
+      const user = await userCollection.findOne(query);
+      res.send({ role: user?.role || "user" });
+    });
 
     app.post("/users", async (req, res) => {
       const user = req.body;
@@ -92,13 +136,38 @@ async function run() {
       res.send(result);
     });
 
+    app.patch(
+      "/users/:id/role",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        const id = req.params.id;
+        const roleInfo = req.body;
+
+        const query = { _id: new ObjectId(id) };
+        const updateDoc = {
+          $set: {
+            role: roleInfo.role,
+          },
+        };
+
+        const result = await userCollection.updateOne(query, updateDoc);
+
+        res.send(result);
+      },
+    );
+
     // parcel API
     app.get("/parcels", async (req, res) => {
       const query = {};
-      const { email } = req.query;
+      const { email, deliveryStatus } = req.query;
       // /parcels?email=''&
       if (email) {
         query.senderEmail = email;
+      }
+
+      if (deliveryStatus) {
+        query.deliveryStatus = deliveryStatus;
       }
 
       const options = { sort: { createdAt: -1 } };
@@ -129,6 +198,37 @@ async function run() {
 
       const result = await parcelCollection.deleteOne(query);
       res.send(result);
+    });
+
+    app.patch(`/parcels/:id`, async (req, res) => {
+      const { riderId, riderName, riderEmail } = req.body;
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+
+      const updatedDoc = {
+        $set: {
+          deliveryStatus: "driver_assigned",
+          riderId: riderId,
+          riderName: riderName,
+          riderEmail: riderEmail,
+        },
+      };
+
+      const result = await parcelCollection.updateOne(query, updatedDoc);
+
+      //update rider information
+      const riderQuery = { _id: new ObjectId(riderId) };
+      const riderUpdatedDoc = {
+        $set: {
+          workStatus: "in_delivery",
+        },
+      };
+      const riderResult = await ridersCollection.updateOne(
+        riderQuery,
+        riderUpdatedDoc,
+      );
+
+      res.send(riderResult);
     });
 
     // payment related
@@ -223,6 +323,7 @@ async function run() {
         const update = {
           $set: {
             paymentStatus: "paid",
+            deliveryStatus: "pending-pickup",
             trackingId: trackingId,
           },
         };
@@ -287,23 +388,34 @@ async function run() {
     });
 
     app.get("/riders", async (req, res) => {
+      const { status, district, workStatus } = req.query;
       const query = {};
+
       if (req.query.status) {
-        query.status = req.query.status;
+        query.status = status;
       }
+
+      if (district) {
+        query.district = district;
+      }
+      if (workStatus) {
+        query.workStatus = workStatus;
+      }
+
       const curosr = ridersCollection.find(query);
       const result = await curosr.toArray();
 
       res.send(result);
     });
 
-    app.patch("/riders/:id", verifyFBToken, async (req, res) => {
+    app.patch("/riders/:id", verifyFBToken, verifyAdmin, async (req, res) => {
       const status = req.body.status;
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const updatedDoc = {
         $set: {
           status: status,
+          workStatus: "available",
         },
       };
 
@@ -330,6 +442,14 @@ async function run() {
       }
       res.send(result);
     });
+
+    // 🔥 RUN ONCE: migrate field "District" → "district"
+    // const migration = await ridersCollection.updateMany(
+    //   { District: { $exists: true } },
+    //   [{ $set: { district: "$District" } }, { $unset: "District" }],
+    // );
+
+    // console.log("Migration complete:", migration);
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
